@@ -1,0 +1,92 @@
+---
+- name: Validate Resource Optimization Service compatibility with Cloud Marketplace images
+  hosts: cloud
+  gather_facts: no
+  become: yes
+  collections:
+    - community.general
+
+  vars_files:
+    - vars/rhsm
+
+  tasks:
+    - name: DNF update
+      yum:
+        state: latest
+
+    - name: Disable RHUI repos
+      shell: subscription-manager config --rhsm.manage_repos=1
+      register: disable_rhui_result
+
+    - name: Disable RHUI result
+      debug: var=disable_rhui_result.stdout
+
+    - name: Register with RHSM and subscribe to a Pool
+      community.general.redhat_subscription:
+        state: present
+        username: "{{rhsm_username}}"
+        password: "{{rhsm_password}}"
+        pool_ids: "{{rhsm_pool_id}}"
+
+    - name: Enable RHSM repo for Ansible/RHEL-8
+      rhsm_repository:
+        name: ansible-2.8-for-rhel-8-x86_64-rpms
+        state: enabled
+
+    - name: Install Ansible
+      yum:
+        name: ansible
+        state: present
+
+    - name: Ensure localhost is present in Ansible's global inventory
+      lineinfile:
+        state: present
+        dest: /etc/ansible/hosts
+        insertafter: EOF
+        line: "localhost"
+      when: not ansible_check_mode
+
+    - name: Enable RHUI repos
+      shell: subscription-manager config --rhsm.manage_repos=0
+      register: enable_rhui_result
+
+    - name: Print Enable RHUI repos result
+      debug: var=enable_rhui_result.stdout_lines
+
+    - name: Download ROS setup playbook
+      get_url:
+        url: https://raw.githubusercontent.com/RedHatInsights/ros-backend/main/ansible-playbooks/ros_install_and_set_up.yml
+        dest: /tmp/ros_install_and_set_up.yml
+
+    - name: Run ROS setup playbook
+      shell: ansible-playbook -c local /tmp/ros_install_and_set_up.yml
+      register: ros_playbook_run
+
+    - name: Print ROS setup playbook run result
+      debug: var=ros_playbook_run.stdout_lines
+
+    - name: Register insights-client and upload first payload
+      shell: insights-client --register
+      register: insights_client_register
+
+    - name: Retrieve Insights-ID
+      shell: cat /etc/insights-client/machine-id
+      register: insights_machine_id
+
+    - name: Validate instance is created in the Insights Inventory
+      uri:
+        url: "https://console.redhat.com/api/inventory/v1/hosts?staleness=fresh&staleness=stale&&registered_with=insights&insights_id={{ insights_machine_id.stdout }}"
+        user: "{{ rhsm_username }}"
+        password: "{{ rhsm_password }}"
+        force_basic_auth: yes
+        method: GET
+        return_content: yes
+      register: inventory_list_result
+      failed_when: inventory_list_result['json']['results'][0]['insights_id'] != insights_machine_id.stdout
+  
+    - name: Unregister insights-client
+      shell: insights-client --unregister
+
+    - name: Unregister RHSM
+      community.general.redhat_subscription:
+        state: absent
